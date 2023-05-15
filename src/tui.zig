@@ -78,9 +78,21 @@ pub const TuiCtx = struct {
                 input.content = .arrow_up;
             } else if (mem.eql(u8, esc_buff[0..esc_read], "[B")) {
                 input.content =  .arrow_down;
+            } else if (mem.eql(u8, esc_buff[0..esc_read], "[C")) {
+                input.content = .arrow_left;
+            } else if (mem.eql(u8, esc_buff[0..esc_read], "[D")) {
+                input.content = .arrow_right;
             }
         } else {
             input.content = .{ .char = buffer[0] };
+            const chars = "abcdefghijklmnopqrstuvwxyz";
+            for (chars) |c| {
+                if (buffer[0] == c & '\x1F') {
+                    input.mod_ctrl = true;
+                    input.content = .{ .char = c };
+                    break;
+                }
+            }
         }
         return input;
     }
