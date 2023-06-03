@@ -12,9 +12,5 @@ pkgs.mkShell {
         mv * $out/bin
       '';
     })
-    pkgconfig
-    gdb
-    SDL2
-    SDL2_image
   ];
 }
