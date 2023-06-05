@@ -7,12 +7,11 @@ const io = std.io;
 const File = fs.File;
 const BufferedWriter = std.io.BufferedWriter;
 const Writer = std.io.Writer;
+const assert = std.debug.assert;
+const Allocator = std.mem.Allocator;
+const ArrayList = std.ArrayList;
 
 var orig_termios: termios = undefined;
-const Modifier = enum {
-    Alt,
-    Ctrl,
-};
 pub const InputContent = union(enum)  {
     escape,
     arrow_up,
@@ -21,11 +20,83 @@ pub const InputContent = union(enum)  {
     arrow_right,
     char: u8,
     // add more later
+    /// convert string to a key, similar to vim keybinding declarations
+    pub fn fromStr(str: []const u8) InputContent {
+        const cmp = std.ascii.eqlIgnoreCase;
+        if (cmp(str, "<ESC>")) return .escape;
+        if (cmp(str, "<LEFT>")) return .arrow_left;
+        if (cmp(str, "<RIGHT>")) return .arrow_right;
+        if (cmp(str, "<DOWN>")) return .arrow_down;
+        if (cmp(str, "<UP>")) return .arrow_up;
+        // if its not special, it has to be on char
+        assert(str.len == 1);
+        return .{ .char = str[0] };
+    }
 };
-const Input = struct {
-    mod_alt: bool,
-    mod_ctrl: bool,
+pub const Input = struct {
+    mod_alt: bool = false,
+    mod_ctrl: bool = false,
     content: InputContent,
+    fn strIsAlt(str: []const u8) bool {
+        const cmp = std.ascii.eqlIgnoreCase;
+        if (cmp(str, "ALT")) return true;
+        if (cmp(str, "A")) return true;
+        if (cmp(str, "M")) return true;
+        if (cmp(str, "META")) return true;
+        return false;
+    }
+    fn strIsCtrl(str: []const u8) bool {
+        const cmp = std.ascii.eqlIgnoreCase;
+        if (cmp(str, "CTRL")) return true;
+        if (cmp(str, "C")) return true;
+        return false;
+    }
+    /// converts an input, i.e 'C-r' or 's' or 'C-M-b' to a Input struct that corresponds to it
+    /// C-{} -> Ctrl-{}, {A,M}-{} -> Alt-{}
+    /// the 
+    /// the modifier is NOT case sensitive
+    pub fn fromStr(str: []const u8) Input {
+        //const toUpper = std.ascii.toUpper;
+        assert(str.len > 0);
+        var iterator = std.mem.splitBackwardsScalar(u8, str, '-');
+        const content = InputContent.fromStr(iterator.next().?);
+        var input: Input = undefined;
+        input.mod_alt = false;
+        input.mod_ctrl = false;
+        input.content = content;
+        for (0..2) |_| {
+            const next = iterator.next();
+            if (next == null) break;
+            if (strIsAlt(next.?)) {
+                assert(input.mod_alt == false);
+                input.mod_alt = true;
+            } else if (strIsCtrl(next.?)) {
+                assert(input.mod_ctrl == false);
+                input.mod_ctrl = true;
+            }
+        }
+        return input;
+    }
+};
+
+test "Input from string" {
+    try std.testing.expectEqual(
+        Input.fromStr("M-C-w"),
+        Input { .mod_ctrl = true, .mod_alt = true, .content = .{ .char = 'w' } }
+    );
+    try std.testing.expectEqual(
+        Input.fromStr("Ctrl-<left>"),
+        Input { .mod_ctrl = true, .mod_alt = false, .content = .arrow_left }
+    );
+
+}
+pub const CharAttributes = packed struct {
+    bold: bool = false,
+    lowint: bool = false,
+    underline: bool = false,
+    reverse: bool = false,
+    blink: bool = false,
+    invisible: bool = false,
 };
 
 const TuiWriter = struct {
@@ -64,7 +135,7 @@ const TuiWriter = struct {
         try self.buf.writer().writeAll("\x1B[?25h");
     }
     pub fn moveCursor(self: *Self, row: usize, col: usize) !void {
-        try self.buf.writer().print("\x1B[{};{}H", .{ row + 1, col + 1 });
+        try self.buf.writer().print("\x1B[{};{}H", .{ col + 1, row + 1 });
     }
     pub fn saveCursor(self: *Self) !void {
         try self.buf.writer().writeAll("\x1B[s");
@@ -75,14 +146,6 @@ const TuiWriter = struct {
     pub fn charAttributesOff(self: *Self) !void {
         try self.buf.writer().writeAll("\x1Bm");
     }
-    pub const CharAttributes = packed struct {
-        bold: bool = false,
-        lowint: bool = false,
-        underline: bool = false,
-        reverse: bool = false,
-        blink: bool = false,
-        invisible: bool = false,
-    };
     pub fn charAttributesOn(self: *Self, attrs: CharAttributes) !void {
         var modifier_numbers: [5]u8 = undefined;
         var counter: usize = 0;
@@ -107,8 +170,9 @@ pub const TuiCtx = struct {
     raw: termios,
     tty: File,
     writer: TuiWriter,
+    windows: ArrayList(TuiWindow),
     const Self = @This();
-    pub fn init() !Self {
+    pub fn init(allocator: Allocator) !Self {
         var tui: TuiCtx = undefined;
         tui.tty = try fs.cwd().openFile("/dev/tty", .{});
         tui.writer = TuiWriter.init();
@@ -125,12 +189,16 @@ pub const TuiCtx = struct {
         raw.cc[os.system.V.TIME] = 0;
         raw.cc[os.system.V.MIN] = 1;
         tui.raw = raw;
+        tui.windows = ArrayList(TuiWindow).init(allocator);
         return tui;
     }
     pub fn deinit(self: *Self) void {
         self.tty.close();
+        self.windows.deinit();
     }
-
+    pub fn add_window(self: *Self, window: TuiWindow) !void {
+        try self.windows.append(window);
+    }
     pub fn start(self: *Self) !void {
         try os.tcsetattr(self.tty.handle, .FLUSH, self.raw);
         try self.writer.hideCursor();
@@ -185,4 +253,81 @@ pub const TuiCtx = struct {
         }
         return input;
     }
+    pub fn draw_windows(self: *Self) !void {
+        try self.writer.clear();
+        for (0..self.windows.items.len) |i| {
+            try self.windows.items[i].draw(&self.writer);
+        }
+        try self.writer.flush();
+    }
 };
+
+const TuiChar = packed struct {
+    attrs: CharAttributes,
+    char: u8,
+};
+const Point = struct {
+    x: usize,
+    y: usize,
+};
+pub const TuiWindow = struct {
+    size: Point,
+    pos: Point,
+    buff: []TuiChar,
+    allocator: Allocator,
+    const Self = @This();
+    pub fn init(allocator: Allocator, pos_x: usize, pos_y: usize, size_x: usize, size_y: usize) !Self {
+        var buff = try allocator.alloc(TuiChar, size_x * size_y);
+        @memset(buff, .{ .attrs = .{}, .char = ' ' } );
+        return Self {
+            .pos = .{ .x = pos_x, .y = pos_y },
+            .size = .{ .x = size_x, .y = size_y },
+            .buff = buff,
+            .allocator = allocator
+        };
+    }
+    pub fn deinit(self: *Self) void {
+        self.allocator.free(self.buff);
+    }
+    pub fn coord_to_idx(self: *Self, x: usize, y: usize) usize {
+        return x + ( y * self.size.x );
+    }
+    pub fn printAt(self: *Self, attrs: CharAttributes, x: usize, y: usize, str: []const u8) void {
+        var real_y = y;
+        var real_x = x;
+        for (str) |c| {
+            if (c == '\n') {
+                real_y += 1;
+                if (real_y >= self.size.y) break;
+                real_x = 0;
+                continue;
+            }
+            if (real_x >= self.size.x - 1) continue;
+            const idx = self.coord_to_idx(real_x, real_y);
+            self.buff[idx].char = c;
+            self.buff[idx].attrs = attrs;
+            real_x += 1;
+        }
+    }
+    pub fn draw(self: *Self, writer: *TuiWriter) !void {
+        var lastAttrs: ?CharAttributes = null;
+        for (0..self.size.y) |y| {
+            for (0..self.size.x) |x| {
+                try writer.moveCursor(x + self.pos.x, y + self.pos.y);
+                const c = self.buff[self.coord_to_idx(x, y)];
+                if (lastAttrs == null or !std.meta.eql(lastAttrs.?, c.attrs)) {
+                    lastAttrs = c.attrs;
+                    try writer.charAttributesOff();
+                    try writer.charAttributesOn(c.attrs);
+                }
+                try writer.buf.writer().writeByte(c.char);
+            }
+        }
+    }
+};
+
+test {
+    try std.testing.expect(
+        !std.meta.eql(CharAttributes { .bold = true } , CharAttributes {})
+    );
+}
