@@ -99,52 +99,54 @@ pub const CharAttributes = packed struct {
     invisible: bool = false,
 };
 
-const TuiWriter = struct {
+pub const TuiWriter = struct {
+    buff: ArrayList(u8),
+    allocator: Allocator,
     const Self = @This();
-    buf: BufferedWriter(4096, @TypeOf(std.io.getStdOut().writer())),
-    pub fn init() Self {
+    pub fn init(allocator: Allocator) Self {
         return Self {
-            .buf = io.bufferedWriter(io.getStdOut().writer())
+            .buff = ArrayList(u8).init(allocator),
+            .allocator = allocator
         };
     }
     pub fn flush(self: *Self) !void {
-        try self.buf.flush();
+        std.io.getStdout().writer().writeAll(self.buff.items);
     }
     pub fn clear(self: *Self) !void {
         // clear screen
-        try self.buf.writer().writeAll("\x1B[2J");
+        self.buff.appendSlice("\x1B[2J");
         // bring cursor to upper left corner
-        try self.buf.writer().writeAll("\x1B[H");
+        try self.buff.appendSlice("\x1B[H");
     }
     pub fn saveScreen(self: *Self) !void {
-        try self.buf.writer().writeAll("\x1B[?47h");
+        try self.buff.appendSlice("\x1B[?47h");
     }
     pub fn restoreScreen(self: *Self) !void {
-        try self.buf.writer().writeAll("\x1B[?47l");
+        try self.buff.appendSlice("\x1B[?47l");
     }
     pub fn enableAlternateBuffer(self: *Self) !void {
-        try self.buf.writer().writeAll("\x1B[?1049h");
+        try self.buff.appendSlice("\x1B[?1049h");
     }
     pub fn disableAlternateBuffer(self: *Self) !void {
-        try self.buf.writer().writeAll("\x1B[?1049l");
+        try self.buff.appendSlice("\x1B[?1049l");
     }
     pub fn hideCursor(self: *Self) !void {
-        try self.buf.writer().writeAll("\x1B[?25l");
+        try self.buff.appendSlice("\x1B[?25l");
     }
     pub fn showCursor(self: *Self) !void {
-        try self.buf.writer().writeAll("\x1B[?25h");
+        try self.buff.appendSlice("\x1B[?25h");
     }
     pub fn moveCursor(self: *Self, row: usize, col: usize) !void {
         try self.buf.writer().print("\x1B[{};{}H", .{ col + 1, row + 1 });
     }
     pub fn saveCursor(self: *Self) !void {
-        try self.buf.writer().writeAll("\x1B[s");
+        try self.buff.appendSlice("\x1B[s");
     }
     pub fn restoreCursor(self: *Self) !void {
-        try self.buf.writer().writeAll("\x1B[u");
+        try self.buff.appendSlice("\x1B[u");
     }
     pub fn charAttributesOff(self: *Self) !void {
-        try self.buf.writer().writeAll("\x1Bm");
+        try self.buff.appendSlice("\x1B[m");
     }
     pub fn charAttributesOn(self: *Self, attrs: CharAttributes) !void {
         var modifier_numbers: [5]u8 = undefined;
@@ -170,9 +172,8 @@ pub const TuiCtx = struct {
     raw: termios,
     tty: File,
     writer: TuiWriter,
-    windows: ArrayList(TuiWindow),
     const Self = @This();
-    pub fn init(allocator: Allocator) !Self {
+    pub fn init() !Self {
         var tui: TuiCtx = undefined;
         tui.tty = try fs.cwd().openFile("/dev/tty", .{});
         tui.writer = TuiWriter.init();
@@ -189,15 +190,10 @@ pub const TuiCtx = struct {
         raw.cc[os.system.V.TIME] = 0;
         raw.cc[os.system.V.MIN] = 1;
         tui.raw = raw;
-        tui.windows = ArrayList(TuiWindow).init(allocator);
         return tui;
     }
     pub fn deinit(self: *Self) void {
         self.tty.close();
-        self.windows.deinit();
-    }
-    pub fn add_window(self: *Self, window: TuiWindow) !void {
-        try self.windows.append(window);
     }
     pub fn start(self: *Self) !void {
         try os.tcsetattr(self.tty.handle, .FLUSH, self.raw);
@@ -253,13 +249,6 @@ pub const TuiCtx = struct {
         }
         return input;
     }
-    pub fn draw_windows(self: *Self) !void {
-        try self.writer.clear();
-        for (0..self.windows.items.len) |i| {
-            try self.windows.items[i].draw(&self.writer);
-        }
-        try self.writer.flush();
-    }
 };
 
 const TuiChar = packed struct {
@@ -309,8 +298,10 @@ pub const TuiWindow = struct {
             real_x += 1;
         }
     }
-    pub fn draw(self: *Self, writer: *TuiWriter) !void {
+    pub fn draw(self: *Self, allocator: Allocator, writer: *TuiWriter) !void {
         var lastAttrs: ?CharAttributes = null;
+        var buff = ArrayList(u8).init(allocator);
+        defer buff.deinit();
         for (0..self.size.y) |y| {
             for (0..self.size.x) |x| {
                 try writer.moveCursor(x + self.pos.x, y + self.pos.y);
@@ -320,9 +311,10 @@ pub const TuiWindow = struct {
                     try writer.charAttributesOff();
                     try writer.charAttributesOn(c.attrs);
                 }
-                try writer.buf.writer().writeByte(c.char);
+                try buff.append(c.char);
             }
         }
+        try writer.buf.writer().writeAll(buff.items);
     }
 };
 
